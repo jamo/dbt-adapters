@@ -1,0 +1,41 @@
+# Note: We need to allow copying from parent directories for our forks
+# So we can't add ../ to .dockerignore
+
+# Git
+.git
+.github
+.gitignore
+
+# Testing
+tests/
+test.env
+test.env.example
+
+# Documentation
+docs/
+examples/
+*.md
+!README.md
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Changes
+.changes/
+.changie.yaml
+
+# Dev tools
+docker/dev.Dockerfile
+docker/README.md

@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import TimeoutError
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 from multiprocessing.context import SpawnContext
@@ -51,6 +52,21 @@ logger = AdapterLogger("BigQuery")
 
 
 BQ_QUERY_JOB_SPLIT = "-----Query Job SQL Follows-----"
+
+# Context variable for passing model config labels to job execution
+_model_labels: ContextVar[Optional[Dict[str, str]]] = ContextVar('_model_labels', default=None)
+
+
+def set_model_labels(labels: Optional[Dict[str, str]]) -> None:
+    """Set model config labels in context for the current execution.
+    
+    This should be called by the adapter before executing a query to ensure
+    labels from model config are passed to the BigQuery job.
+    
+    Args:
+        labels: Dictionary of label key-value pairs from model config
+    """
+    _model_labels.set(labels)
 
 
 @dataclass
@@ -221,6 +237,34 @@ class BigQueryConnectionManager(BaseConnectionManager):
 
         return {}
 
+    def get_labels_from_model_config(self) -> Dict:
+        """Extract labels from the model config via context variable.
+        
+        This allows passing labels defined in model config to BigQuery job labels
+        for cost tracking purposes. Labels are set by the adapter via set_model_labels()
+        before query execution.
+        """
+        try:
+            # Get labels from context variable (set by BigQueryAdapter.execute)
+            labels = _model_labels.get()
+            logger.debug(f"get_labels_from_model_config: labels from context={labels}")
+            
+            if not labels or not isinstance(labels, dict):
+                return {}
+            
+            # Sanitize all label keys and values
+            sanitized_labels = {
+                _sanitize_label(str(key)): _sanitize_label(str(value))
+                for key, value in labels.items()
+            }
+            
+            logger.debug(f"get_labels_from_model_config: sanitized labels={sanitized_labels}")
+            return sanitized_labels
+            
+        except Exception as e:
+            logger.debug(f"get_labels_from_model_config: error={e}")
+            return {}
+
     def generate_job_id(self) -> str:
         # Generating a fresh job_id for every _query_and_results call to avoid job_id reuse.
         # Generating a job id instead of persisting a BigQuery-generated one after client.query is called.
@@ -244,8 +288,14 @@ class BigQueryConnectionManager(BaseConnectionManager):
 
         fire_event(SQLQuery(conn_name=conn.name, sql=sql, node_info=get_node_info()))
 
-        labels = self.get_labels_from_query_comment()
+        # Start with labels from model config
+        labels = self.get_labels_from_model_config()
+        
+        # Merge with query comment labels (query comment labels take precedence)
+        query_comment_labels = self.get_labels_from_query_comment()
+        labels.update(query_comment_labels)
 
+        # Always add invocation_id (takes highest precedence)
         labels["dbt_invocation_id"] = get_invocation_id()
 
         job_params = {
@@ -300,6 +350,30 @@ class BigQueryConnectionManager(BaseConnectionManager):
     def execute(
         self, sql, auto_begin=False, fetch=None, limit: Optional[int] = None
     ) -> Tuple[BigQueryAdapterResponse, "agate.Table"]:
+        # Extract labels from node context before execution
+        # This is called by materializations, so it's the right place to hook
+        try:
+            from dbt_common.events.contextvars import get_current_node
+            
+            node = get_current_node()
+            if node and hasattr(node, 'config'):
+                config = node.config
+                
+                # Labels are stored in config._extra dict, not as a direct attribute
+                # This is where dbt stores custom config fields
+                labels = None
+                if hasattr(config, '_extra') and isinstance(config._extra, dict):
+                    labels = config._extra.get('labels')
+                else:
+                    # Fallback: try direct attribute (for future dbt versions)
+                    labels = getattr(config, 'labels', None)
+                
+                if isinstance(labels, dict) and labels:
+                    set_model_labels(labels)
+                    logger.debug(f"Set model labels from config for {node.unique_id}: {list(labels.keys())}")
+        except Exception as e:
+            logger.debug(f"Could not extract labels from node: {e}")
+        
         sql = self._add_query_comment(sql)
         # auto_begin is ignored on bigquery, and only included for consistency
         query_job, iterator = self.raw_execute(sql, limit=limit)

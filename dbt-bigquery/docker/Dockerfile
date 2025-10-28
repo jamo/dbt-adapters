@@ -6,13 +6,13 @@ FROM python:$py_version-slim-bullseye AS base
 RUN apt-get update \
   && apt-get dist-upgrade -y \
   && apt-get install -y --no-install-recommends \
-    build-essential=12.9 \
-    ca-certificates=20210119 \
-    git=1:2.30.2-1+deb11u2 \
-    libpq-dev=13.18-0+deb11u1 \
-    make=4.3-4.1 \
-    openssh-client=1:8.4p1-5+deb11u3 \
-    software-properties-common=0.96.20.2-2.1 \
+    build-essential \
+    ca-certificates \
+    git \
+    libpq-dev \
+    make \
+    openssh-client \
+    software-properties-common \
   && apt-get clean \
   && rm -rf \
     /var/lib/apt/lists/* \
@@ -27,11 +27,26 @@ RUN python -m pip install --upgrade "pip==24.0" "setuptools==69.2.0" "wheel==0.4
 
 FROM base AS dbt-bigquery
 
-ARG commit_ref=main
-
 HEALTHCHECK CMD dbt --version || exit 1
 
 WORKDIR /usr/app/dbt/
-ENTRYPOINT ["dbt"]
 
-RUN python -m pip install --no-cache-dir "dbt-bigquery @ git+https://github.com/dbt-labs/dbt-bigquery@${commit_ref}"
+# Note: Build this with context from /Users/jarmo/git/tokenterminal:
+# docker build -f dbt-adapters/dbt-bigquery/docker/Dockerfile -t dbt-bigquery:patched-model-labels .
+
+# Install our forked dbt-common first (adds current_node context)
+COPY dbt-common /tmp/dbt-common
+RUN python -m pip install --no-cache-dir /tmp/dbt-common && \
+    rm -rf /tmp/dbt-common
+
+# Install our forked dbt-core (sets node in context before execution)
+COPY dbt-core/core /tmp/dbt-core
+RUN python -m pip install --no-cache-dir /tmp/dbt-core && \
+    rm -rf /tmp/dbt-core
+
+# Copy and install patched dbt-bigquery with model config labels support
+COPY dbt-adapters/dbt-bigquery /tmp/dbt-bigquery-src
+RUN python -m pip install --no-cache-dir /tmp/dbt-bigquery-src && \
+    rm -rf /tmp/dbt-bigquery-src
+
+ENTRYPOINT ["dbt"]

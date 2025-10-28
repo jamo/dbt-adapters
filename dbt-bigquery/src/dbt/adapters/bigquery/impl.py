@@ -160,6 +160,26 @@ class BigQueryAdapter(BaseAdapter):
         self.add_catalog_integration(constants.DEFAULT_INFO_SCHEMA_CATALOG)
         self.add_catalog_integration(constants.DEFAULT_ICEBERG_CATALOG)
 
+    def execute(self, sql, auto_begin=False, fetch=None):
+        """Override execute to extract model config labels from execution context."""
+        try:
+            from dbt_common.events.contextvars import get_current_node
+            from dbt.adapters.bigquery.connections import set_model_labels
+            
+            # Get the full node from execution context (set by dbt-core)
+            node = get_current_node()
+            if node and hasattr(node, 'config'):
+                # Extract labels from node config
+                labels = getattr(node.config, 'labels', None)
+                if isinstance(labels, dict) and labels:
+                    # Set labels in connection context for raw_execute to use
+                    set_model_labels(labels)
+                    logger.debug(f"Set model labels from node config for {node.unique_id}: {labels}")
+        except Exception as e:
+            logger.debug(f"Could not extract model labels from node: {e}")
+        
+        return super().execute(sql, auto_begin=auto_begin, fetch=fetch)
+
     ###
     # Implementations of abstract methods
     ###
